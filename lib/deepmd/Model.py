@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import shutil
 import sys
 import time
 import numpy as np
@@ -28,38 +29,39 @@ def j_must_have (jdata, key) :
         return jdata[key]
 
 def j_have (jdata, key) :
-    return key in jdata.keys() 
+    return key in jdata.keys()
 
 class LearingRate (object) :
-    def __init__ (self, 
-                  jdata, 
+    def __init__ (self,
+                  jdata,
                   tot_numb_batches) :
         self.decay_steps_ = j_must_have(jdata, 'decay_steps')
         self.decay_rate_ = j_must_have(jdata, 'decay_rate')
-        self.start_lr_ = j_must_have(jdata, 'start_lr')        
+        self.start_lr_ = j_must_have(jdata, 'start_lr')
         self.tot_numb_batches = tot_numb_batches
 
-    def value (self, 
+    def value (self,
               batch) :
         return self.start_lr_ * np.power (self.decay_rate_, (batch // self.decay_steps()))
 
     def decay_steps (self) :
 #        return self.decay_steps_ * self.tot_numb_batches
         return self.decay_steps_
-    
-    def decay_rate (self) : 
+
+    def decay_rate (self) :
         return self.decay_rate_
 
     def start_lr (self) :
         return self.start_lr_
 
 class NNPModel (object):
-    def __init__(self, 
-                 sess, 
-                 jdata, 
-                 run_opt = RunOptions()):
+    def __init__(self,
+                 #sess,
+                 jdata,
+                 #run_opt = RunOptions()):
+                 run_opt):
         self.run_opt = run_opt
-        self.sess = sess
+        #self.sess = sess
         # descrpt config
         self.use_smooth = False
         if j_have (jdata, "use_smooth") :
@@ -70,7 +72,7 @@ class NNPModel (object):
             self.sel_r = j_must_have (jdata, 'sel_r')
         else :
             if j_have (jdata, 'sel_r') :
-                self.warning ('ignoring key sel_r in the json database and set sel_r to %s' % 
+                self.warning ('ignoring key sel_r in the json database and set sel_r to %s' %
                               str(self.sel_r))
         self.rcut_a = -1
         self.rcut_r = j_must_have (jdata, 'rcut')
@@ -88,7 +90,7 @@ class NNPModel (object):
             self.n_axis_neuron = j_must_have (jdata, 'n_axis_neuron')
             self.filter_resnet_dt = False
             if j_have(jdata, 'filter_resnet_dt') :
-                self.filter_resnet_dt = jdata['filter_resnet_dt']        
+                self.filter_resnet_dt = jdata['filter_resnet_dt']
         # numb of neighbors and numb of descrptors
         self.nnei_a = np.cumsum(self.sel_a)[-1]
         self.nnei_r = np.cumsum(self.sel_r)[-1]
@@ -150,8 +152,8 @@ class NNPModel (object):
         if self.verbose :
             print ("# " + str(msg))
 
-    def build (self, 
-               data, 
+    def build (self,
+               data,
                lr) :
         self.ntypes = len(self.sel_a)
         assert (self.ntypes == len(self.sel_r)), "size sel r array should match ntypes"
@@ -166,126 +168,145 @@ class NNPModel (object):
             = data.get_batch (sys_idx = 0)
         self.ncopies = np.cumprod(ncopies)[-1]
         natoms_vec = natoms_vec.astype(np.int32)
-        t_rcut = tf.constant(np.max([self.rcut_r, self.rcut_a]), name = 't_rcut', dtype = tf.float64)
-        t_ntypes = tf.constant(self.ntypes, name = 't_ntypes', dtype = tf.int32)
 
         test_coord_ = test_coord
         test_box_ = test_box
         test_type_ = test_type
 
         self.compute_stats (test_coord_, test_box_, test_type_, natoms_vec, default_mesh)
-        print ("# computed stats")
-        sys.stdout.flush()
+        if self.run_opt.is_chief:
+            print ("# computed stats")
+            sys.stdout.flush()
 
         bias_atom_e = data.get_sys(0).get_bias_atom_e()
 
-        self.t_prop_c           = tf.placeholder(tf.float32, [3],    name='t_prop_c')
-        self.t_energy           = tf.placeholder(tf.float64, [None], name='t_energy')
-        self.t_force            = tf.placeholder(tf.float64, [None], name='t_force')
-        self.t_virial           = tf.placeholder(tf.float64, [None], name='t_virial')
-        self.t_coord            = tf.placeholder(tf.float64, [None], name='t_coord')
-        self.t_type             = tf.placeholder(tf.int32,   [None], name='t_type')
-        self.t_natoms           = tf.placeholder(tf.int32,   [self.ntypes+2], name='t_natoms')
-        self.t_box              = tf.placeholder(tf.float64, [None, 9], name='t_box')
-        self.t_mesh             = tf.placeholder(tf.int32,   [None], name='t_mesh')
-        self.is_training        = tf.placeholder(tf.bool)
+        worker_device = "/job:{0:s}/task:{1:d}/cpu:0".format(self.run_opt.my_job_name,
+                                                             self.run_opt.my_task_index)
+        with tf.device(tf.train.replica_device_setter(worker_device = worker_device,
+                                                      cluster = self.run_opt.cluster)):
+            t_rcut = tf.constant(np.max([self.rcut_r, self.rcut_a]), name = 't_rcut', dtype = tf.float64)
+            t_ntypes = tf.constant(self.ntypes, name = 't_ntypes', dtype = tf.int32)
+            self.t_prop_c           = tf.placeholder(tf.float32, [3],    name='t_prop_c')
+            self.t_energy           = tf.placeholder(tf.float64, [None], name='t_energy')
+            self.t_force            = tf.placeholder(tf.float64, [None], name='t_force')
+            self.t_virial           = tf.placeholder(tf.float64, [None], name='t_virial')
+            self.t_coord            = tf.placeholder(tf.float64, [None], name='t_coord')
+            self.t_type             = tf.placeholder(tf.int32,   [None], name='t_type')
+            self.t_natoms           = tf.placeholder(tf.int32,   [self.ntypes+2], name='t_natoms')
+            self.t_box              = tf.placeholder(tf.float64, [None, 9], name='t_box')
+            self.t_mesh             = tf.placeholder(tf.int32,   [None], name='t_mesh')
+            self.is_training        = tf.placeholder(tf.bool)
 
-        self._extra_train_ops   = []
-        self.global_step        = tf.get_variable('global_step', 
-                                                  [],
-                                                  initializer=tf.constant_initializer(0),
-                                                  trainable=False, 
-                                                  dtype=tf.int32)
-        self.starter_learning_rate = lr.start_lr()
-        self.learning_rate = tf.train.exponential_decay(lr.start_lr(), 
-                                                        self.global_step,
-                                                        lr.decay_steps(),
-                                                        lr.decay_rate(), 
-                                                        staircase=True)
-        
-        self.energy_frz, self.force_frz, self.virial_frz \
-            = self.build_interaction (1,                self.t_coord, self.t_type, self.t_natoms, self.t_box, self.t_mesh, bias_atom_e = bias_atom_e, suffix = "test", reuse = False)
-        self.energy_tst, self.force_tst, self.virial_tst \
-            = self.build_interaction (self.numb_test,   self.t_coord, self.t_type, self.t_natoms, self.t_box, self.t_mesh, bias_atom_e = bias_atom_e, suffix = "train_test", reuse = True)
-        self.energy_bch = []
-        self.force_bch = []
-        self.virial_bch = []
-        for ii in range(self.numb_batch_size_value) :
-            tmp_energy_bch, tmp_force_bch, tmp_virial_bch \
-                = self.build_interaction (self.batch_size_value[ii],  
-                                          self.t_coord, 
-                                          self.t_type, 
-                                          self.t_natoms, 
-                                          self.t_box, 
-                                          self.t_mesh, 
-                                          bias_atom_e = bias_atom_e, 
-                                          suffix = "train_batch_" + str(self.batch_size_value[ii]), 
-                                          reuse = True)
-            self.energy_bch.append(tmp_energy_bch)
-            self.force_bch.append(tmp_force_bch)
-            self.virial_bch.append(tmp_virial_bch)
+            self._extra_train_ops   = []
+            #self.global_step        = tf.get_variable('global_step',
+            #                                          [],
+            #                                          initializer=tf.constant_initializer(0),
+            #                                          trainable=False,
+            #                                          dtype=tf.int32)
+            self.global_step = tf.train.get_or_create_global_step()
+            self.starter_learning_rate = lr.start_lr()
+            #start_lr = tf.constant(self.starter_learning_rate, dtype = tf.float64)
+            self.learning_rate = tf.train.exponential_decay(lr.start_lr(),
+                                                            self.global_step,
+                                                            lr.decay_steps(),
+                                                            lr.decay_rate(),
+                                                            staircase=True)
 
-        self.l2_l_tst, self.l2_el_tst, self.l2_fl_tst, self.l2_vl_tst \
-            = self.loss (self.ncopies, self.t_natoms, self.t_prop_c, self.t_energy, self.energy_tst, self.t_force, self.force_tst, self.t_virial, self.virial_tst, suffix = "train_test")
-        self.l2_l_bch = []
-        self.l2_el_bch = []
-        self.l2_fl_bch = []
-        self.l2_vl_bch = []
-        for ii in range(self.numb_batch_size_value) :                    
-            tmp_l2_l_bch, tmp_l2_el_bch, tmp_l2_fl_bch, tmp_l2_vl_bch \
-                = self.loss (self.ncopies, self.t_natoms, self.t_prop_c, self.t_energy, self.energy_bch[ii], self.t_force, self.force_bch[ii], self.t_virial, self.virial_bch[ii], suffix = "train_batch_" + str(self.batch_size_value[ii]))
-            self.l2_l_bch.append(tmp_l2_l_bch)
-            self.l2_el_bch.append(tmp_l2_el_bch)
-            self.l2_fl_bch.append(tmp_l2_fl_bch)
-            self.l2_vl_bch.append(tmp_l2_vl_bch)
+            self.energy_frz, self.force_frz, self.virial_frz \
+                = self.build_interaction (1,                self.t_coord, self.t_type, self.t_natoms, self.t_box, self.t_mesh, bias_atom_e = bias_atom_e, suffix = "test", reuse = False)
+            self.energy_tst, self.force_tst, self.virial_tst \
+                = self.build_interaction (self.numb_test,   self.t_coord, self.t_type, self.t_natoms, self.t_box, self.t_mesh, bias_atom_e = bias_atom_e, suffix = "train_test", reuse = True)
+            self.energy_bch = []
+            self.force_bch = []
+            self.virial_bch = []
+            for ii in range(self.numb_batch_size_value) :
+                tmp_energy_bch, tmp_force_bch, tmp_virial_bch \
+                    = self.build_interaction (self.batch_size_value[ii],
+                                              self.t_coord,
+                                              self.t_type,
+                                              self.t_natoms,
+                                              self.t_box,
+                                              self.t_mesh,
+                                              bias_atom_e = bias_atom_e,
+                                              suffix = "train_batch_" + str(self.batch_size_value[ii]),
+                                              reuse = True)
+                self.energy_bch.append(tmp_energy_bch)
+                self.force_bch.append(tmp_force_bch)
+                self.virial_bch.append(tmp_virial_bch)
 
-        self.train_op = []
-        trainable_variables = tf.trainable_variables()
-        optimizer = tf.train.AdamOptimizer(learning_rate = self.learning_rate)
-        for ii in range(self.numb_batch_size_value) :
-            grads = tf.gradients(self.l2_l_bch[ii], trainable_variables)
-            apply_op = optimizer.apply_gradients (zip (grads, trainable_variables),
-                                                  global_step=self.global_step,
-                                                  name='train_step')
-            train_ops = [apply_op] + self._extra_train_ops
-            self.train_op.append(tf.group(*train_ops))
+            self.l2_l_tst, self.l2_el_tst, self.l2_fl_tst, self.l2_vl_tst \
+                = self.loss (self.ncopies, self.t_natoms, self.t_prop_c, self.t_energy, self.energy_tst, self.t_force, self.force_tst, self.t_virial, self.virial_tst, suffix = "train_test")
+            self.l2_l_bch = []
+            self.l2_el_bch = []
+            self.l2_fl_bch = []
+            self.l2_vl_bch = []
+            for ii in range(self.numb_batch_size_value) :
+                tmp_l2_l_bch, tmp_l2_el_bch, tmp_l2_fl_bch, tmp_l2_vl_bch \
+                    = self.loss (self.ncopies, self.t_natoms, self.t_prop_c, self.t_energy, self.energy_bch[ii], self.t_force, self.force_bch[ii], self.t_virial, self.virial_bch[ii], suffix = "train_batch_" + str(self.batch_size_value[ii]))
+                self.l2_l_bch.append(tmp_l2_l_bch)
+                self.l2_el_bch.append(tmp_l2_el_bch)
+                self.l2_fl_bch.append(tmp_l2_fl_bch)
+                self.l2_vl_bch.append(tmp_l2_vl_bch)
 
-        saver = tf.train.Saver()
+            self.train_op = []
+            trainable_variables = tf.trainable_variables()
+            optimizer = tf.train.AdamOptimizer(learning_rate = self.learning_rate)
+            # Use the sync distributed optimizer
+            optimizer = tf.train.SyncReplicasOptimizer(
+                optimizer,
+                replicas_to_aggregate = self.run_opt.cluster.num_tasks("worker"),
+                total_num_replicas = self.run_opt.cluster.num_tasks("worker"),
+                name = "sync_replicas")
+            self.sync_replicas_hook = optimizer.make_session_run_hook(self.run_opt.is_chief)
+            for ii in range(self.numb_batch_size_value) :
+                grads = tf.gradients(self.l2_l_bch[ii], trainable_variables)
+                apply_op = optimizer.apply_gradients (zip (grads, trainable_variables),
+                                                      global_step=self.global_step,
+                                                      name='train_step')
+                train_ops = [apply_op] + self._extra_train_ops
+                self.train_op.append(tf.group(*train_ops))
 
-        # initialization
-        if self.run_opt.init_mode == 'init_from_scratch' :
-            print ("# initialize model from scratch")
-            init_op = tf.global_variables_initializer()
-            self.sess.run(init_op)
-            fp = open(self.disp_file, "w")
-            fp.close ()
-        elif self.run_opt.init_mode == 'init_from_model' :
-            print ("# initialize from model %s" % self.run_opt.init_model)
-            init_op = tf.global_variables_initializer()
-            self.sess.run(init_op)
-            saver.restore (self.sess, self.run_opt.init_model)            
-            self.sess.run(self.global_step.assign(0))
-            fp = open(self.disp_file, "w")
-            fp.close ()
-        elif self.run_opt.init_mode == 'restart' :
-            print ("# restart from model %s" % self.run_opt.restart)
-            init_op = tf.global_variables_initializer()
-            self.sess.run(init_op)
-            saver.restore (self.sess, self.run_opt.restart)
-        else :
-            raise RuntimeError ("unkown init mode")
-
-    def train (self, 
-               data, 
-               stop_batch) :
 
         # get saver
-        saver = tf.train.Saver()
+        #self.saver = tf.train.Saver()
 
-        fp = open(self.disp_file, "a")
+    def train (self,
+               data,
+               stop_batch) :
+
+        if self.run_opt.is_chief:
+            # initialization
+            if self.run_opt.init_mode == 'init_from_scratch' :
+                print ("# initialize model from scratch")
+                #init_op = tf.global_variables_initializer()
+                #self.sess.run(init_op)
+                fp = open(self.disp_file, "w")
+                fp.close ()
+            elif self.run_opt.init_mode == 'init_from_model' :
+                print ("# initialize from model %s" % self.run_opt.init_model)
+                #init_op = tf.global_variables_initializer()
+                #self.sess.run(init_op)
+                self.saver.restore (self.sess, self.run_opt.init_model)
+                self.sess.run(self.global_step.assign(0))
+                fp = open(self.disp_file, "w")
+                fp.close ()
+            elif self.run_opt.init_mode == 'restart' :
+                print ("# restart from model %s" % self.run_opt.restart)
+                init_op = tf.global_variables_initializer()
+                #self.sess.run(init_op)
+                self.saver.restore (self.sess, self.run_opt.restart)
+            else :
+                raise RuntimeError ("unkown init mode")
+
+        fp = None
+        if self.run_opt.is_chief:
+            self.print_head()
+            fp = open(self.disp_file, "a")
 
         train_time = 0
-        cur_batch = self.sess.run(self.global_step)
+        # cur_batch = self.sess.run(self.global_step)
+        cur_batch = 0
+        self.cur_batch = cur_batch
 
         prf_options = None
         prf_run_metadata = None
@@ -293,12 +314,35 @@ class NNPModel (object):
             prf_options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
             prf_run_metadata = tf.RunMetadata()
 
-        while cur_batch < stop_batch :
-            batch_prop_c, batch_energy, batch_force, batch_virial, batch_coord, batch_box, batch_type, natoms_vec, default_mesh, ncopies = data.get_batch (sys_weights = self.sys_weights)
+        config = tf.ConfigProto(intra_op_parallelism_threads=self.run_opt.num_intra_threads,
+                              inter_op_parallelism_threads=self.run_opt.num_inter_threads)
+
+        # The stop_hook handles stopping after running given steps
+        # stop_hook = tf.train.StopAtStepHook(last_step = stop_batch)
+        #hooks = [self.sync_replicas_hook, stop_hook]
+        hooks = [self.sync_replicas_hook]
+        ckpt_dir = os.path.join(os.getcwd(), self.save_ckpt)
+        if self.run_opt.is_chief:
+            if os.path.exists(ckpt_dir):
+                shutil.rmtree(ckpt_dir)
+            os.makedirs(ckpt_dir)
+        scaffold = tf.train.Scaffold(saver=tf.train.Saver(max_to_keep = 1))
+        # Use monitor session for distributed computation
+        self.sess = tf.train.MonitoredTrainingSession(master = self.run_opt.server.target,
+                                                      is_chief = self.run_opt.is_chief,
+                                                      config = config,
+                                                      hooks = hooks,
+                                                      scaffold = scaffold,
+                                                      checkpoint_dir = ckpt_dir)
+                                                      #save_checkpoint_steps = self.save_freq)
+
+        #while not self.sess.should_stop():
+        while cur_batch < stop_batch:
+            batch_prop_c, batch_energy, batch_force, batch_virial, batch_coord, batch_box, batch_type, natoms_vec, default_mesh, ncopies = data.get_batch ()
             cur_batch_size = batch_energy.shape[0]
             cur_bs_idx = self.batch_size_value.index(cur_batch_size)
             feed_dict_batch = {self.t_prop_c:        batch_prop_c,
-                               self.t_energy:        batch_energy, 
+                               self.t_energy:        batch_energy,
                                self.t_force:         np.reshape(batch_force, [-1]),
                                self.t_virial:        np.reshape(batch_virial, [-1]),
                                self.t_coord:         np.reshape(batch_coord, [-1]),
@@ -310,26 +354,28 @@ class NNPModel (object):
             if self.display_in_training and cur_batch == 0 :
                 self.test_on_the_fly(fp, data, feed_dict_batch, cur_bs_idx)
             if self.timing_in_training : tic = time.time()
-            self.sess.run([self.train_op[cur_bs_idx]], feed_dict = feed_dict_batch, options=prf_options, run_metadata=prf_run_metadata)
+            self.sess.run([self.train_op[cur_bs_idx]], feed_dict = feed_dict_batch,
+                          options=prf_options, run_metadata=prf_run_metadata)
             if self.timing_in_training : toc = time.time()
             if self.timing_in_training : train_time += toc - tic
             cur_batch = self.sess.run(self.global_step)
+            self.cur_batch = cur_batch
 
             if self.display_in_training and (cur_batch % self.disp_freq == 0) :
                 tic = time.time()
                 self.test_on_the_fly(fp, data, feed_dict_batch, cur_bs_idx)
                 toc = time.time()
                 test_time = toc - tic
-                if self.timing_in_training :
-                    print ("# batch %7d training time %.2f s, testing time %.2f s" % (cur_batch, train_time, test_time))
+                if self.timing_in_training and self.run_opt.is_chief:
+                    print ("# (%s, %d): batch %7d training time %.2f s, testing time %.2f s"
+                           % (self.run_opt.my_job_name, self.run_opt.my_task_index, cur_batch, train_time, test_time))
                     train_time = 0
-                if self.save_freq > 0 and cur_batch % self.save_freq == 0 :
-                    save_path = saver.save (self.sess, os.getcwd() + "/" + self.save_ckpt)
-                    print ("# saved checkpoint %s" % save_path)
+                #if self.save_freq > 0 and cur_batch % self.save_freq == 0 :
+                #    save_path = self.saver.save (self.sess, os.getcwd() + "/" + self.save_ckpt)
+                #    print ("# saved checkpoint %s" % save_path)
                 sys.stdout.flush()
-
-        fp.close ()
-        if self.profiling :
+        if self.run_opt.is_chief: fp.close ()
+        if self.profiling and self.run_opt.is_chief:
             fetched_timeline = timeline.Timeline(prf_run_metadata.step_stats)
             chrome_trace = fetched_timeline.generate_chrome_trace_format()
             with open(self.profiling_file, 'w') as f:
@@ -341,12 +387,13 @@ class NNPModel (object):
     def print_head (self) :
         fp = open(self.disp_file, "a")
         fp.write ("# %5s   %9s %9s   %9s %9s   %9s %9s   %9s %9s   %13s\n" % ("batch", "l2_tst", "l2_trn", "l2_e_tst", "l2_e_trn", "l2_f_tst", "l2_f_trn", "l2_v_tst", "l2_v_trn", "lr"))
-        fp.close ()
+        fp.flush()
+        fp.close()
 
     def test_on_the_fly (self,
                          fp,
                          data,
-                         feed_dict_batch, 
+                         feed_dict_batch,
                          ii) :
         test_prop_c, test_energy, test_force, test_virial, test_coord, test_box, test_type, natoms_vec, default_mesh, ncopies \
             = data.get_test ()
@@ -371,56 +418,63 @@ class NNPModel (object):
             = self.sess.run([self.l2_l_tst, self.l2_el_tst, self.l2_fl_tst, self.l2_vl_tst], feed_dict=feed_dict_test)
         error_train, error_e_train, error_f_train, error_v_train \
             = self.sess.run([self.l2_l_bch[ii], self.l2_el_bch[ii], self.l2_fl_bch[ii], self.l2_vl_bch[ii]], feed_dict=feed_dict_batch)
-        cur_batch = self.sess.run(self.global_step)
-        current_lr = self.sess.run(tf.to_double(self.learning_rate))
-        fp.write ("%7d   %9.2e %9.2e   %9.2e %9.2e   %9.2e %9.2e   %9.2e %9.2e   %13.6e\n" %
-                  (cur_batch, 
-                   np.sqrt(error_test), np.sqrt(error_train), 
-                   np.sqrt(error_e_test) / natoms_vec[0], np.sqrt(error_e_train) / natoms_vec[0], 
-                   np.sqrt(error_f_test), np.sqrt(error_f_train), 
-                   np.sqrt(error_v_test) / natoms_vec[0], np.sqrt(error_v_train) / natoms_vec[0],
-                   current_lr))
-        fp.flush ()
+        #cur_batch = self.sess.run(self.global_step)
+        cur_batch = self.cur_batch
+        #current_lr = self.sess.run(tf.to_double(self.learning_rate))
+        current_lr = self.sess.run(self.learning_rate)
+        if self.run_opt.is_chief:
+           fp.write ("%7d   %9.2e %9.2e   %9.2e %9.2e   %9.2e %9.2e   %9.2e %9.2e   %13.6e\n" %
+                     (cur_batch,
+                      np.sqrt(error_test), np.sqrt(error_train),
+                      np.sqrt(error_e_test) / natoms_vec[0], np.sqrt(error_e_train) / natoms_vec[0],
+                      np.sqrt(error_f_test), np.sqrt(error_f_train),
+                      np.sqrt(error_v_test) / natoms_vec[0], np.sqrt(error_v_train) / natoms_vec[0],
+                      current_lr))
+           fp.flush ()
 
-    def compute_stats (self, 
-                       data_coord, 
-                       data_box, 
-                       data_atype, 
+    def compute_stats (self,
+                       data_coord,
+                       data_box,
+                       data_atype,
                        natoms_vec,
                        mesh,
-                       reuse = None) :    
+                       reuse = None) :
         avg_zero = np.zeros(self.ndescrpt).astype(np.float64)
         std_ones = np.ones (self.ndescrpt).astype(np.float64)
-        if self.use_smooth :
-            descrpt, descrpt_deriv, rij, nlist \
-                = op_module.descrpt_norot (tf.constant(data_coord),
-                                           tf.constant(data_atype),
-                                           tf.constant(natoms_vec, dtype = tf.int32),
-                                           tf.constant(data_box),
-                                           tf.constant(mesh),
-                                           tf.constant(avg_zero),
-                                           tf.constant(std_ones),
-                                           rcut_a = self.rcut_a,
-                                           rcut_r = self.rcut_r,
-                                           rcut_r_smth = self.rcut_r_smth,
-                                           sel_a = self.sel_a,
-                                           sel_r = self.sel_r)
-        else :
-            descrpt, descrpt_deriv, rij, nlist, axis \
-                = op_module.descrpt (tf.constant(data_coord),
-                                     tf.constant(data_atype),
-                                     tf.constant(natoms_vec, dtype = tf.int32),
-                                     tf.constant(data_box),
-                                     tf.constant(mesh),
-                                     tf.constant(avg_zero),
-                                     tf.constant(std_ones),
-                                     rcut_a = self.rcut_a,
-                                     rcut_r = self.rcut_r,
-                                     sel_a = self.sel_a,
-                                     sel_r = self.sel_r,
-                                     axis_rule = self.axis_rule)
+        sub_graph = tf.Graph()
+        with sub_graph.as_default():
+            if self.use_smooth :
+                descrpt, descrpt_deriv, rij, nlist \
+                    = op_module.descrpt_norot (tf.constant(data_coord),
+                                               tf.constant(data_atype),
+                                               tf.constant(natoms_vec, dtype = tf.int32),
+                                               tf.constant(data_box),
+                                               tf.constant(mesh),
+                                               tf.constant(avg_zero),
+                                               tf.constant(std_ones),
+                                               rcut_a = self.rcut_a,
+                                               rcut_r = self.rcut_r,
+                                               rcut_r_smth = self.rcut_r_smth,
+                                               sel_a = self.sel_a,
+                                               sel_r = self.sel_r)
+            else :
+                descrpt, descrpt_deriv, rij, nlist, axis \
+                    = op_module.descrpt (tf.constant(data_coord),
+                                         tf.constant(data_atype),
+                                         tf.constant(natoms_vec, dtype = tf.int32),
+                                         tf.constant(data_box),
+                                         tf.constant(mesh),
+                                         tf.constant(avg_zero),
+                                         tf.constant(std_ones),
+                                         rcut_a = self.rcut_a,
+                                         rcut_r = self.rcut_r,
+                                         sel_a = self.sel_a,
+                                         sel_r = self.sel_r,
+                                         axis_rule = self.axis_rule)
         # self.sess.run(tf.global_variables_initializer())
-        dd = self.sess.run (descrpt)
+        sub_sess = tf.Session(graph = sub_graph)
+        dd = sub_sess.run(descrpt)
+        sub_sess.close()
         if self.use_smooth :
             dd = np.reshape (dd, [-1, 4])
             ddr = dd[:,:1]
@@ -440,30 +494,30 @@ class NNPModel (object):
             dstd = np.std     (dd, axis = 0)
             for ii in range (len(dstd)) :
                 if (np.abs(dstd[ii]) < 1e-2) :
-                    dstd[ii] = 1e-2            
+                    dstd[ii] = 1e-2
         np.savetxt ("stat.avg.out", davg)
-        np.savetxt ("stat.std.out", dstd)        
-        self.t_avg = tf.get_variable('t_avg', 
-                                     davg.shape, 
+        np.savetxt ("stat.std.out", dstd)
+        self.t_avg = tf.get_variable('t_avg',
+                                     davg.shape,
                                      dtype = tf.float64,
                                      trainable = False,
                                      initializer = tf.constant_initializer(davg, dtype = tf.float64))
-        self.t_std = tf.get_variable('t_std', 
-                                     dstd.shape, 
+        self.t_std = tf.get_variable('t_std',
+                                     dstd.shape,
                                      dtype = tf.float64,
                                      trainable = False,
                                      initializer = tf.constant_initializer(dstd, dtype = tf.float64))
 
-    def loss (self, 
+    def loss (self,
               ncopies,
               natoms,
               prop_c,
-              energy, 
+              energy,
               energy_hat,
               force,
-              force_hat, 
+              force_hat,
               virial,
-              virial_hat, 
+              virial_hat,
               suffix):
         l2_ener_loss = tf.reduce_mean( tf.square(energy - energy_hat), name='l2_'+suffix)
 
@@ -476,7 +530,7 @@ class NNPModel (object):
         virial_hat_reshape = tf.reshape (virial_hat, [-1])
         l2_virial_loss = tf.reduce_mean (tf.square(virial_hat_reshape - virial_reshape), name = "l2_virial_" + suffix)
 
-        atom_norm  = 1./ tf.to_double(natoms[0]) 
+        atom_norm  = 1./ tf.to_double(natoms[0])
         atom_norm *= 1./ tf.to_double(ncopies * ncopies)
         pref_e = tf.to_double(prop_c[0] * (self.limit_pref_e + (self.start_pref_e - self.limit_pref_e) * self.learning_rate / self.starter_learning_rate) )
         pref_f = tf.to_double(prop_c[1] * (self.limit_pref_f + (self.start_pref_f - self.limit_pref_f) * self.learning_rate / self.starter_learning_rate) )
@@ -492,16 +546,16 @@ class NNPModel (object):
 
         return l2_loss, l2_ener_loss, l2_force_loss, l2_virial_loss
 
-    def build_interaction (self, 
+    def build_interaction (self,
                            nframes,
-                           coord_, 
+                           coord_,
                            atype_,
                            natoms,
-                           box, 
+                           box,
                            mesh,
-                           suffix, 
+                           suffix,
                            bias_atom_e = 0.0,
-                           reuse = None):        
+                           reuse = None):
         coord = tf.reshape (coord_, [-1, natoms[1] * 3])
         atype = tf.reshape (atype_, [-1, natoms[1]])
 
@@ -510,7 +564,7 @@ class NNPModel (object):
                 = op_module.descrpt_norot (coord,
                                            atype,
                                            natoms,
-                                           box,                                    
+                                           box,
                                            mesh,
                                            self.t_avg,
                                            self.t_std,
@@ -524,7 +578,7 @@ class NNPModel (object):
                 = op_module.descrpt (coord,
                                      atype,
                                      natoms,
-                                     box,                                    
+                                     box,
                                      mesh,
                                      self.t_avg,
                                      self.t_std,
@@ -535,11 +589,11 @@ class NNPModel (object):
                                      axis_rule = self.axis_rule)
 
         descrpt_reshape = tf.reshape(descrpt, [-1, self.ndescrpt])
-        
+
         atom_ener = self.build_atom_net (nframes, descrpt_reshape, natoms, bias_atom_e = bias_atom_e, reuse = reuse)
 
         energy_raw = tf.reshape(atom_ener, [-1, natoms[0]], name = 'atom_energy_'+suffix)
-        energy = tf.reduce_sum(energy_raw, axis=1, name='energy_'+suffix)        
+        energy = tf.reduce_sum(energy_raw, axis=1, name='energy_'+suffix)
 
         net_deriv_tmp = tf.gradients (atom_ener, descrpt_reshape)
         net_deriv = net_deriv_tmp[0]
@@ -585,16 +639,16 @@ class NNPModel (object):
         atom_virial = tf.reshape (atom_virial, [-1, 9 * natoms[1]], name = "atom_virial_"+suffix)
 
         return energy, force, virial
-    
-    def build_atom_net (self, 
+
+    def build_atom_net (self,
                         nframes,
-                        inputs, 
+                        inputs,
                         natoms,
                         bias_atom_e = 0.0,
                         reuse = None) :
         start_index = 0
         inputs = tf.reshape(inputs, [-1, self.ndescrpt * natoms[0]])
-        shape = inputs.get_shape().as_list()        
+        shape = inputs.get_shape().as_list()
 
         for type_i in range(self.ntypes):
             # cut-out inputs
@@ -629,24 +683,24 @@ class NNPModel (object):
 
         return tf.reshape(outs, [-1])
 
-    def _one_layer(self, 
-                   inputs, 
-                   outputs_size, 
-                   activation_fn=tf.nn.tanh, 
+    def _one_layer(self,
+                   inputs,
+                   outputs_size,
+                   activation_fn=tf.nn.tanh,
                    stddev=1.0,
                    bavg=0.0,
-                   name='linear', 
+                   name='linear',
                    reuse=None,
-                   seed=None, 
+                   seed=None,
                    use_timestep = False):
         with tf.variable_scope(name, reuse=reuse):
             shape = inputs.get_shape().as_list()
-            w = tf.get_variable('matrix', 
-                                [shape[1], outputs_size], 
+            w = tf.get_variable('matrix',
+                                [shape[1], outputs_size],
                                 tf.float64,
                                 tf.random_normal_initializer(stddev=stddev/np.sqrt(shape[1]+outputs_size), seed = seed))
-            b = tf.get_variable('bias', 
-                                [outputs_size], 
+            b = tf.get_variable('bias',
+                                [outputs_size],
                                 tf.float64,
                                 tf.random_normal_initializer(stddev=stddev, mean = bavg, seed = seed))
             hidden = tf.matmul(inputs, w) + b
@@ -659,27 +713,27 @@ class NNPModel (object):
         if activation_fn != None:
             if self.useBN:
                 None
-                # hidden_bn = self._batch_norm(hidden, name=name+'_normalization', reuse=reuse)   
+                # hidden_bn = self._batch_norm(hidden, name=name+'_normalization', reuse=reuse)
                 # return activation_fn(hidden_bn)
             else:
                 if use_timestep :
                     return activation_fn(hidden) * idt
                 else :
-                    return activation_fn(hidden)                    
+                    return activation_fn(hidden)
         else:
             if self.useBN:
                 None
                 # return self._batch_norm(hidden, name=name+'_normalization', reuse=reuse)
             else:
                 return hidden
-    
-    def _DS_layer(self, 
-                   inputs, 
+
+    def _DS_layer(self,
+                   inputs,
                    natoms,
-                   activation_fn=tf.nn.tanh, 
+                   activation_fn=tf.nn.tanh,
                    stddev=1.0,
                    bavg=0.0,
-                   name='linear', 
+                   name='linear',
                    reuse=None,
                    seed=None):
         # natom x (nei x 4)
@@ -691,27 +745,27 @@ class NNPModel (object):
           xyz_scatter_total = []
           for type_i in range(self.ntypes):
             # cut-out inputs
-            # with natom x (nei_type_i x 4)  
+            # with natom x (nei_type_i x 4)
             inputs_i = tf.slice (inputs,
                                  [ 0, start_index*      4],
                                  [-1, self.sel_a[type_i]* 4] )
             start_index += self.sel_a[type_i]
             shape_i = inputs_i.get_shape().as_list()
-            # with (natom x nei_type_i) x 4  
+            # with (natom x nei_type_i) x 4
             inputs_reshape = tf.reshape(inputs_i, [-1, 4])
             xyz_scatter = tf.reshape(tf.slice(inputs_reshape, [0,0],[-1,1]),[-1,1])
             for ii in range(1, len(outputs_size)):
-              w = tf.get_variable('matrix_'+str(ii)+'_'+str(type_i), 
-                                [outputs_size[ii - 1], outputs_size[ii]], 
+              w = tf.get_variable('matrix_'+str(ii)+'_'+str(type_i),
+                                [outputs_size[ii - 1], outputs_size[ii]],
                                 tf.float64,
                                 tf.random_normal_initializer(stddev=stddev/np.sqrt(outputs_size[ii]+outputs_size[ii-1]), seed = seed))
-              b = tf.get_variable('bias_'+str(ii)+'_'+str(type_i), 
-                                [1, outputs_size[ii]], 
+              b = tf.get_variable('bias_'+str(ii)+'_'+str(type_i),
+                                [1, outputs_size[ii]],
                                 tf.float64,
                                 tf.random_normal_initializer(stddev=stddev, mean = bavg, seed = seed))
               if self.filter_resnet_dt :
-                  idt = tf.get_variable('idt_'+str(ii)+'_'+str(type_i), 
-                                        [1, outputs_size[ii]], 
+                  idt = tf.get_variable('idt_'+str(ii)+'_'+str(type_i),
+                                        [1, outputs_size[ii]],
                                         tf.float64,
                                         tf.random_normal_initializer(stddev=0.001, mean = 1.0, seed = seed))
               if outputs_size[ii] == outputs_size[ii-1]:
@@ -719,7 +773,7 @@ class NNPModel (object):
                       xyz_scatter += activation_fn(tf.matmul(xyz_scatter, w) + b) * idt
                   else :
                       xyz_scatter += activation_fn(tf.matmul(xyz_scatter, w) + b)
-              elif outputs_size[ii] == outputs_size[ii-1] * 2: 
+              elif outputs_size[ii] == outputs_size[ii-1] * 2:
                   if self.filter_resnet_dt :
                       xyz_scatter = tf.concat([xyz_scatter,xyz_scatter], 1) + activation_fn(tf.matmul(xyz_scatter, w) + b) * idt
                   else :
