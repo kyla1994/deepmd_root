@@ -2,9 +2,9 @@ from setuptools import setup,find_packages
 setup(name='deepmd',
 version='1.2',
 author='Deepmd Group',
-packages=find_packages(),
+packages=find_packages('src'),
 package_data={
-    '':['*.txt','*.so', 'dp_*'],
+    '':['*.so', 'dp_*'],
 },
 entry_points = {
     'console_scripts':[
